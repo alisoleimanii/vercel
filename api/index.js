@@ -1,63 +1,50 @@
 export const config = { runtime: "edge" };
 
-const TARGET_BASE = (process.env.TARGET_DOMAIN || "").replace(/\/$/, "");
-
-const STRIP_HEADERS = new Set([
-  "host",
-  "connection",
-  "keep-alive",
-  "proxy-authenticate",
-  "proxy-authorization",
-  "te",
-  "trailer",
-  "transfer-encoding",
-  "upgrade",
-  "forwarded",
-  "x-forwarded-host",
-  "x-forwarded-proto",
-  "x-forwarded-port",
-]);
-
 export default async function handler(req) {
-  if (!TARGET_BASE) {
-    return new Response("Misconfigured: TARGET_DOMAIN is not set", { status: 500 });
-  }
-
   try {
-    const pathStart = req.url.indexOf("/", 8);
-    const targetUrl =
-      pathStart === -1 ? TARGET_BASE + "/" : TARGET_BASE + req.url.slice(pathStart);
+    const TARGET = process.env.TARGET_DOMAIN || "";
+    
+    // اعتبارسنجی بی‌رحمانه متغیر محیطی
+    if (!TARGET.startsWith("http")) {
+      return new Response("Config Error: TARGET_DOMAIN must start with http:// or https:// (e.g., http://1.2.3.4:80)", { status: 500 });
+    }
+
+    const reqUrl = new URL(req.url);
+    const targetUrl = new URL(reqUrl.pathname + reqUrl.search, TARGET).toString();
 
     const out = new Headers();
-    let clientIp = null;
-    for (const [k, v] of req.headers) {
-      if (STRIP_HEADERS.has(k)) continue;
-      if (k.startsWith("x-vercel-")) continue;
-      if (k === "x-real-ip") {
-        clientIp = v;
-        continue;
-      }
-      if (k === "x-forwarded-for") {
-        if (!clientIp) clientIp = v;
-        continue;
-      }
+    const STRIP = [
+      "host", "connection", "upgrade", "keep-alive", 
+      "transfer-encoding", "te", "trailer", 
+      "proxy-authorization", "proxy-authenticate"
+    ];
+    
+    for (const [k, v] of req.headers.entries()) {
+      const key = k.toLowerCase();
+      if (STRIP.includes(key) || key.startsWith("x-vercel-") || key.startsWith("x-forwarded-")) continue;
       out.set(k, v);
     }
-    out.set("host", new URL(TARGET_BASE).host);
-    if (clientIp) out.set("x-forwarded-for", clientIp);
-
-    const method = req.method;
-    const hasBody = method !== "GET" && method !== "HEAD";
-
-    return await fetch(targetUrl, {
-      method,
-      headers: out,
-      body: hasBody ? req.body : undefined,
-      duplex: "half",
-      redirect: "manual",
-    });
-  } catch (err) {
     
-    console.error("relay error:", err);
-return new Response("Error: " + err.message, { status: 502 });  }
+    // تنظیم دقیق هدر Host برای سرور مقصد
+    out.set("host", new URL(TARGET).host);
+
+    const init = {
+      method: req.method,
+      headers: out,
+      redirect: "manual",
+    };
+
+    // تزریق ایمن Body فقط در صورت وجود، برای جلوگیری از کِرَشِ internal error
+    if (req.method !== "GET" && req.method !== "HEAD" && req.body) {
+      init.body = req.body;
+      init.duplex = "half";
+    }
+
+    const response = await fetch(targetUrl, init);
+    return response;
+
+  } catch (err) {
+    // خروجی کامل خطا برای دیباگ دقیق
+    return new Response(`Crash Report:\nMessage: ${err.message}\nStack: ${err.stack}`, { status: 502 });
+  }
 }
