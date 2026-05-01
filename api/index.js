@@ -1,48 +1,62 @@
 export const config = { runtime: "edge" };
 
+const TARGET_BASE = (process.env.TARGET_DOMAIN || "").replace(/\/$/, "");
+
+const STRIP_HEADERS = new Set([
+  "host",
+  "connection",
+  "keep-alive",
+  "proxy-authenticate",
+  "proxy-authorization",
+  "te",
+  "trailer",
+  "transfer-encoding",
+  "upgrade",
+  "forwarded",
+  "x-forwarded-host",
+  "x-forwarded-proto",
+  "x-forwarded-port",
+]);
+
 export default async function handler(req) {
-  // تعریف متغیرها بیرون از بلاک try برای جلوگیری از خطای ReferenceError
-  const rawTarget = process.env.TARGET_DOMAIN || "";
-  const TARGET = rawTarget.trim();
+  if (!TARGET_BASE) {
+    return new Response("Misconfigured: TARGET_DOMAIN is not set", { status: 500 });
+  }
 
   try {
-    if (!TARGET.startsWith("http")) {
-      return new Response("Config Error: TARGET_DOMAIN missing or invalid. Check Vercel Env Variables.", { status: 500 });
-    }
-
-    const reqUrl = new URL(req.url);
-    const targetUrl = TARGET.replace(/\/$/, "") + reqUrl.pathname + reqUrl.search;
+    const pathStart = req.url.indexOf("/", 8);
+    const targetUrl =
+      pathStart === -1 ? TARGET_BASE + "/" : TARGET_BASE + req.url.slice(pathStart);
 
     const out = new Headers();
-    const STRIP = [
-      "host", 
-      "connection", "upgrade", "keep-alive", 
-      "transfer-encoding", "te", "trailer", 
-      "proxy-authorization", "proxy-authenticate"
-    ];
-    
-    for (const [k, v] of req.headers.entries()) {
-      const key = k.toLowerCase();
-      if (STRIP.includes(key) || key.startsWith("x-vercel-") || key.startsWith("x-forwarded-")) continue;
+    let clientIp = null;
+    for (const [k, v] of req.headers) {
+      if (STRIP_HEADERS.has(k)) continue;
+      if (k.startsWith("x-vercel-")) continue;
+      if (k === "x-real-ip") {
+        clientIp = v;
+        continue;
+      }
+      if (k === "x-forwarded-for") {
+        if (!clientIp) clientIp = v;
+        continue;
+      }
       out.set(k, v);
     }
+    if (clientIp) out.set("x-forwarded-for", clientIp);
 
-    const init = {
-      method: req.method,
+    const method = req.method;
+    const hasBody = method !== "GET" && method !== "HEAD";
+
+    return await fetch(targetUrl, {
+      method,
       headers: out,
+      body: hasBody ? req.body : undefined,
+      duplex: "half",
       redirect: "manual",
-    };
-
-    if (req.method !== "GET" && req.method !== "HEAD" && req.body) {
-      init.body = req.body;
-      init.duplex = "half";
-    }
-
-    const response = await fetch(targetUrl, init);
-    return response;
-
+    });
   } catch (err) {
-    // الان TARGET در دسترس است و کانتینر کِرَش نمی‌کند
-    return new Response(`Crash Report 3:\nTarget Env: ${TARGET}\nMessage: ${err.message}`, { status: 502 });
+    console.error("relay error:", err);
+    return new Response("Bad Gateway: Tunnel Failed", { status: 502 });
   }
 }
