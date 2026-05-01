@@ -2,19 +2,21 @@ export const config = { runtime: "edge" };
 
 export default async function handler(req) {
   try {
-    const TARGET = process.env.TARGET_DOMAIN || "";
+    // گرفتن متغیر و حذف فاصله‌های خالی احتمالی (Trim)
+    const TARGET = (process.env.TARGET_DOMAIN || "").trim();
     
-    // اعتبارسنجی بی‌رحمانه متغیر محیطی
     if (!TARGET.startsWith("http")) {
-      return new Response("Config Error: TARGET_DOMAIN must start with http:// or https:// (e.g., http://1.2.3.4:80)", { status: 500 });
+      return new Response("Config Error: TARGET_DOMAIN missing or invalid. Check Vercel Env Variables.", { status: 500 });
     }
 
     const reqUrl = new URL(req.url);
-    const targetUrl = new URL(reqUrl.pathname + reqUrl.search, TARGET).toString();
+    // ساختن URL مقصد به صورت کاملاً امن
+    const targetUrl = TARGET.replace(/\/$/, "") + reqUrl.pathname + reqUrl.search;
 
     const out = new Headers();
     const STRIP = [
-      "host", "connection", "upgrade", "keep-alive", 
+      "host", // هدر هاست باید حذف بشه ولی دستی نباید ست بشه!
+      "connection", "upgrade", "keep-alive", 
       "transfer-encoding", "te", "trailer", 
       "proxy-authorization", "proxy-authenticate"
     ];
@@ -25,8 +27,7 @@ export default async function handler(req) {
       out.set(k, v);
     }
     
-    // تنظیم دقیق هدر Host برای سرور مقصد
-    out.set("host", new URL(TARGET).host);
+    // اینجا دیگه out.set("host", ...) نداریم. موتور خودش از targetUrl می‌خونه!
 
     const init = {
       method: req.method,
@@ -34,7 +35,6 @@ export default async function handler(req) {
       redirect: "manual",
     };
 
-    // تزریق ایمن Body فقط در صورت وجود، برای جلوگیری از کِرَشِ internal error
     if (req.method !== "GET" && req.method !== "HEAD" && req.body) {
       init.body = req.body;
       init.duplex = "half";
@@ -44,7 +44,7 @@ export default async function handler(req) {
     return response;
 
   } catch (err) {
-    // خروجی کامل خطا برای دیباگ دقیق
-    return new Response(`Crash Report:\nMessage: ${err.message}\nStack: ${err.stack}`, { status: 502 });
+    // حالا ارور به ما میگه دقیقاً سعی کرده به کجا وصل بشه!
+    return new Response(`Crash Report 2:\nTarget Env: ${process.env.TARGET_DOMAIN}\nAttempted URL: ${TARGET.replace(/\/$/, "") + new URL(req.url).pathname}\nMessage: ${err.message}`, { status: 502 });
   }
 }
